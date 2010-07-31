@@ -1,0 +1,6 @@
+MODULES =
+	$(MODULE cords)
+	$(MODULE cord_l)
+	$(MODULE iolists)
+	$(MODULE RBt)
+	$(MODULE cord_t)

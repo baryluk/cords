@@ -1,0 +1,12 @@
+#!/usr/bin/perl
+
+# simple script trying to convert D 2.0 ino D 1.0
+
+while (<>) {
+	s/\b(invariant|const)\s*\(([^\)]+)\)/\2/g;
+	s/\b(invariant|const)\s*\(([^\)]*\([^\)]+\)[^\)]*)\)/\2/g;
+	s/\b(invariant|const)\s*\(([^\)]*\([^\)]*\([^\)]+\)[^\)]*\)[^\)]*)\)/\2/g;
+	s/\b(invariant|const)\s*\(([^\)]*\([^\)]*\([^\)]*\([^\)]*\([^\)]+\)[^\)]*\)[^\)]*\)[^\)]*)\)/\2/g;
+	s/\b(invariant|const)\s+class\b/class/g;
+	print;
+}

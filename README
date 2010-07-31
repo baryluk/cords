@@ -1,0 +1,946 @@
+Cords for D version 1.0
+
+BSD License
+
+PREAMBLE Problem
+=================================
+
+Suppose you want to prepare HTML document in your web server written in D.
+
+Let it be simple on the first try:
+
+
+string g(string x) {
+	return x ~ " - <b>" ~ x ~ "</b>";
+}
+
+string extraargs(string s) {
+	return "s=2";
+}
+
+string generate_1(string title, string[] points) {
+	string s = "<head><title>" ~ title ~ "</title></head><body>"; // line a
+	if (points.length > 0) {
+		s ~= "<ul>"; // line b
+		foreach (point; points) { // line c
+			s ~= "<li>" ~ g(point) ~ "</li>"; // line d
+		}
+		s ~= "</ul>"; // line e
+	}
+	s ~= "</body>"; // line f
+	
+	return "<html "~extraargs(s)~">" ~ s ~ "</html>"; // line g
+}
+
+You can say it works. But it is far from perfect.
+
+What is really going here:
+
+Line a:
+  first program calculates concatenation of three strings: ''opening head'', title and ''opening body''.
+  And resulting string writes to variable s. Compiler is calling here special version
+  of opCat operator for strings, which handle concatenation of fixed number of arrays efficiently.
+  (they first calculate target length of s, then uses fast memcpy into proper slices).
+  Without this optimisation compiler will first create temporary "<html><head><title>" ~ title,
+  which then will be used for last concatenation and forgotten. Compiler is smart here.
+  Suppose s holds now 50 characters;
+
+Line b:
+  Now we asked compiler to append "<ul>" because we want to create list.
+  But s array is too small to hold this additional 4 bytes. Compiler
+  creates new array with size 4 bytes larger, copies whole 50 characters from original
+  s and then on the end of new array 4 bytes from appended text.
+  OK, we now see something is going wrong.
+
+Line c and d:
+  We are now iterating lists of points, for each of it we first create "<li>" some function
+  g on point, and "</li>". Then we concatenate this 3 arrays (without creating temporaries),
+  and resulting array (which is temporary) append to s, by resizing s and copying it.
+
+Line e:
+  Same as b, but now to just append 5 bytes, we need to copy maybe few kilobytes (or megabytes!)
+  of data.
+
+Line f:
+  Same as e
+
+Line g:
+  We want here to prepend and append web page with html tags, additionally
+  html tag have some attributes depended on just generated content of web page.
+  Compiler first calculates values of this 5 arrays, take their length,
+  create new array with the size which is a sum of thees lengths,
+  and copy all of them into proper places.
+
+
+Such simple example shows us that something is bad in text processing here. We
+are creating lots of temporary arrays and do excessive copings and allocations.
+This simple function can quickly be of O(n^2) complexity, because of this hidden
+costs.
+
+What if we have ten thousands of points?
+
+There is multiple possibilities. The main problem here is that array s is created
+always only as big as to hold needed data. But we know that it will be appended
+extensively. We can estimate size of this array, or resize it more aggressively.
+
+How to estimate size ? We can just guess: maybe 100 + title.length + points.length * 100 will be sufficient approximation?
+Or maybe we should count it more precisely?
+
+Try 2:
+string extraargs(char[] s) {
+	return "s=2";
+}
+
+size_t g_size(string x) {
+	return x.length + " - <b>".length + x.length + "</b>".length;
+}
+
+size_t generate_2_size(string title, string[] points) {
+	size_t s = "<head><title>".length + title.length + "</title></head><body>".length; // line a
+	if (points.length > 0) {
+		s += "<ul>".length; // line b
+		foreach (point; points) { // line c
+			s += "<li>".length + g_size(point) + "</li>".length; // line d
+		}
+		s += "</ul>".length; // line e
+	}
+	s += "</body>".length; // line f
+	
+	return "<html ".length~50~">".length + s + "</html>".length; // line g. estimated size of extraargs(s) == 50
+}
+string generate_2(string title, string[] points) {
+	T[] s;
+	size_t s_size = generate_2_size(title, points);
+	s.length = s_size;
+	size_t already = 0;
+	void append(string str) {
+		if (already+str.length >= s_size) {
+			s.length = s_size = already+str.length;
+		}
+		s[already .. already+str.length] = str[];
+		already += str.length;
+	}
+	append("<head><title>" ~ title ~ "</title></head><body>"); // line a
+	if (points.length > 0) {
+		append("<ul>"); // line b
+		foreach (point; points) { // line c
+			append("<li>" ~ g(point) ~ "</li>"); // line d
+		}
+		append("</ul>"); // line e
+	}
+	append("</body>"); // line f
+	
+	s.length = already; // line h
+	
+	s = "<html "~extraargs(s)~">" ~ s ~ "</html>"; // line g
+	return cast(invariant)s;
+}
+
+
+Wow. Lots of new code. We have generate_2_size which does pretty same as
+generate_2 but just count how much bytes it will take resulting array.
+It can't calculate everything precisely. i.e. extraargs need real array s,
+which we don't have in this function. We are also calling function g on points.
+So this function will be called two times. Both in estimation phase
+and in real phase. (It can be for example result of some SQL query, where points
+are just some WHERE clauses for this query). Double calling this function
+can be horrible, both in space, time and semantic (it can have side effects).
+We can cache results, but... it adds lots of complexity, and isn't thread
+safe probably. We can make it local, but we will need any way then copy it
+into resulting string s from cache.
+
+Second problem is that this function need to be synchronized with generate_2.
+If we introduce change into generate_2 also generate_2_size need to be adjusted.
+
+After calculating estimated size (we can't estimate size of extraargs resulting
+array exactly), we prepare array s, and use nested function for handling
+it. In case the estimated size was too small, we grow it more. In line h,
+we change this size to real one, and then do some additional concatenation,
+because we need to prepend data here. Unfortunately this last copying will
+copy whole just created array, because data needs to be moved (even if s
+is big enough).
+
+Last problem can be mitigated be starting writing s array not from index 0,
+but for example from 100, then use sparse free space before this index
+to put there extraargs(s) and <html>. Then slice buffer and return.
+Problem is that 100 bytes can be too small sometimes. Who knows.
+As we can see things are getting more and more complicated.
+
+One can say that we can just output directly to file or network socket.
+Yes, sometimes it is better to write directly to file (so we will have
+additional parameter Stream, and out function will return nothing
+probably), but there is few problem.
+
+For network sockets it can lead
+to excessive amount of packets (for each ~= we will send packet).
+This can be solved using TCP_CORK feature under Linux, which delay
+sending of small TCP packets and then merges them into larger one,
+so bandwidth can be used more efficiently. Such behaviour
+can be also implemented directly in D (and be portable): use small buffer (few kB),
+and write to it on append; if it will be full send it to TCP stack, and start filling it again.
+
+Unfortunately sometime it's not possible even this way. When we need
+to put for example MD5SUM before actual stream? We will need to calculate
+it twice. This is mostly a design error (such hash value should be after stream,
+so both client and server can calculate them in parallel efficiently),
+but it is example giving you that direct sending isn't always possible.
+This is an example of out extraargs(s) function, it depend on actual of
+value of s, so it we need to postpone sending it's value, when we will
+end calculating whole s.
+
+Also putting networking stuff directly into such function is problematic,
+if for example one day we want to build GUI and want to display
+out HTML directly in GTK? We will need to rewrite handling of sockets.
+
+Last problem is with cast(invariant). Here we know that it is really
+invariant after return (it was only created here), after return of this function
+it is constant. But it can break larger programs.
+
+Another problem is that function which return strings makes own copies,
+and then we copy them into proper location of s. This can be solved
+by passing target buffer to this function, but then this functions
+also need lots of changes, especially error handling.
+
+There are also other tricks, but unfortunately aren't general.
+For each of them we can easily find example which will make
+another problems. For example try this:
+s = s[ 10_000 .. 20_000 ] .. g(s) .. s [ 30_000 .. 40_000 ];
+
+Solution to this problem are Cords. General purpose implementation
+of string handling structure, suitable for keeping whole
+array in memory. It have all above operations
+(opCat from left and right, opCatAssign) implemented efficiently,
+it also doesn't enforce you to calculate anything twice.
+
+Cords are immutable structure, often used in functional languages,
+text editors and high performance servers.
+
+Our example can be written just in this form:
+
+import cords : Cord;
+
+Cord extraargs(Cord s) {
+	return Cord("s=2");
+}
+
+string generate_3(string title, string[] points) {
+	Cord s = "<head><title>" ~ title ~ "</title></head><body>"; // line a
+	if (points.length > 0) {
+		s ~= "<ul>"; // line b
+		foreach (point; points) { // line c
+			s ~= "<li>" ~ Cord(g(point)) ~ "</li>"; // line d
+		}
+		s ~= "</ul>"; // line e
+	}
+	s ~= "</body>"; // line f
+	
+	s = "<html "~Cord(extraargs(s))~">" ~ s ~ "</html>"; // line g
+	return s.toString(); // allocate exactly s.length bytes and fill it
+}
+
+Cord calls in line d and g are necessary because without them
+compiler will concatenate normal strings, so we need to enforce here
+usage of cord functions.
+
+No unnecessary copying and allocation are done. Interface
+is very simple and compatible with strings (i.e. we are not using lazy calls,
+so order of called functions are preserved. Important if they have side effects).
+You can also remove s.toString() on the return, just change return type to Cord,
+and use cords in your whole program, to make it even faster.
+
+Next sections will show how it is implemented. So opCat* and opSlice*
+methods are fast.
+
+For API and more examples look into DDoc generated documentation.
+
+There is multiple examples in examples*.d files which uses multiple
+available interfaces: cord_t aka CordI, RBCord_t aka RBCord, cord_wrap aka Cord,
+and legacy cord_string aka CordS. This interfaces allows for multiple
+styles of programing and simple switching to standard strings:
+  * CordI - fully immutable structure. functional style, single assignment.
+            - Main implementation.
+            - operators only for CordI and T[], invariant(T)[], T
+  * RBCord - allows changing reference to CordI, so internal cords are still
+             are immutable, but we can point to other cords using single variable.
+             - uses CordI internally, and some cast/union tricks like std.typecons.Rebindable
+             - operators for RBCord, CordI and T[], invariant(T)[], T
+  * Cord - fully hides immutability, you can assign to them, change in place,
+           do opCatAssign and so on.
+           - uses RBCord internally
+           - operators for Cord, RBCord, CordI and T[], invariant(T)[], T
+  * CordS - legacy support for standard invariant(T)[]
+            - the same semantic like Cord
+            - not very optimal, opCat copies data always for safety
+            - operators for CordS, Cord, RBCord, CordI and T[], invariant(T)[], T
+  * CordSMutable - just like CordS but allows real in-place mutating of data.
+            - different semantic.
+            - not thread safe
+            - know what are you doing
+
+There is also simpler (and sometimes faster) structure called IOList
+(common in network servers written in Erlang programing language).
+
+0 Cords for D
+=================================
+
+Cords are special tree based representation of arrays. They are mostly
+used in large text processing and in functional languages as base string
+representation. They are also useful in generation of documents from
+templates (ie. HTML pages), where there is often need to prepend or append
+already generated strings.
+
+Cords (also known as ropes) are well balanced trees, which leafs are normal
+arrays of chars. They are designed to be pretty fast on common operations,
+like fetching single char, appending, prepending, or slicing. They also
+support fast iteration over all chars or leafs, this is useful for IO
+(ie. writing prepered document to network socket) without to converting
+it to standard array.
+
+Cords are immutable data, so this data structure is very good for
+multithreaded and functional style programing environment.
+
+Standard applications of cords are:
+  * Servers which needs to prepare dynamic content (ie. HTML documents)
+  * Compilers and code generators
+  * Filters and converters of formats
+  * Text editors for large files with undo/redo history
+  * Esoteric Virtual Machines (see ICFP 2007)
+
+
+1 Introduction to representation
+===================================
+Cords are binary trees, whose leafs are standard D arrays.
+
+Each node know it's size (for leafs it is length of array, for real nodes
+it is sum of all leafs in subtree, or equivalently sum of left and right
+nodes sizes).
+
+Each node also know it's depth (length of path to deepest leaf). Leafs have
+depth 0.
+
+There is no leaf with 0 length. All degenerated cases are handled well
+automatically.
+
+So we can assume that this is example tree:
+
+
+  cord_t!(char) x =           X*
+                              / \
+                             /   \
+                            /     \
+                           /       \
+                         Y*      C' brown'
+                         / \
+                        /   \
+                       /     \
+                   A'the ' B'quick'
+
+
+Retrieval chars from such tree and iterating is trivial.
+
+What about appending?
+
+Normally appending (and prepending), is just creating new Z* node,
+and setting left and right pointers appropriately.
+
+  auto z = x ~ " fox";
+
+                                  Z*
+                                  / \
+                                 /   \
+                                /     \
+                              X*     D' fox'
+                              / \
+                             /   \
+                            /     \
+                           /       \
+                         Y*      C' brown'
+                         / \
+                        /   \
+                       /     \
+                   A'the ' B'quick'
+
+This creates new cords z, which shares most of it with x. There is only
+one drawback, if we will repeat this operation, access to beginning of cords
+will be much slower, because depth of tree will grow. But just appended
+part will be very fast.
+
+  auto z2 = z ~ " jumps";
+                                 Z2*
+                                  / \
+                                 /   \
+                                /     \
+                              Z*     E' jumps'
+                              / \
+                             /   \
+                            /     \
+                          X*     D' fox'
+                          / \
+                         /   \
+                        /     \
+                       /       \
+                     Y*      C' brown'
+                     / \
+                    /   \
+                   /     \
+               A'the ' B'quick'
+
+
+Actually there is another way to implement append: find right most leaf, and try to
+append node there.
+
+                              X'*
+                               / \
+                              /   \
+                             /     \
+                            /       \
+                           /         \
+                          /           \
+                        Y*            Z'*
+                        / \            / \
+                       /   \          /   \
+                      /     \        /     \
+                 A'the ' B'quick'   /       \
+                                 C' brown'  D' fox'
+
+This seems to produce more balanced tree. But it is not true. Append next element.
+
+                              X"*
+                               / \
+                              /   \
+                             /     \
+                            /       \
+                           /         \
+                          /           \
+                        Y*            Z"*
+                        / \            / \
+                       /   \          /   \
+                      /     \        /     \
+                 A'the ' B'quick'   /       \
+                                 C' brown' S'*
+                                            / \
+                                           /   \
+                                      D' fox' E' jumps'
+
+This also produces not well balanced tree, but on the right side (so old
+data are still fast). Additionally some internal nodes are completely different,
+so they need to be recreated. This is slow, and we are not doing this.
+
+
+Back to real thing, after few append we will get
+
+
+                                                 Z6*
+                                                  / \
+                                                 /   \
+                                                /     \
+                                             Z5*     I'dog.'
+                                              / \
+                                             /   \
+                                            /     \
+                                         Z4*     H'lazy '
+                                          / \
+                                         /   \
+                                        /     \
+                                     Z3*     G'the '
+                                      / \
+                                     /   \
+                                    /     \
+                                 Z2*      F' over '
+                                  / \
+                                 /   \
+                                /     \
+                              Z*     E' jumps'
+                              / \
+                             /   \
+                            /     \
+                          X*     D' fox'
+                          / \
+                         /   \
+                        /     \
+                       /       \
+                     Y*      C' brown'
+                     / \
+                    /   \
+                   /     \
+               A'the ' B'quick'
+
+
+If its depth will exceed MAX_DEPTH (48), it will be automatically rebalanced.
+So high limit was choices because after rebalance depth will be much more
+lower (about 15) in most cases, and if we only append, cost of balancing
+will be amortized.
+
+This can be forced. Then cord will look like this (balancing considers also
+length of string, but we will ignore this now).
+
+
+
+  auto n = z6.forcebalance();
+
+                                                N*
+                                               /  \
+                                              /    \
+                                             /      \
+                                            /        \
+                                           /          \
+                                          /            \
+                                         /              \
+                                        /                \
+                                       /                  \
+                                      /                    \
+                                     /                      \
+                                    /                        \
+                                   /                          \
+                                  /                            \
+                                 /                              \
+                                /                                \
+                               *                                  \
+                              / \                                  \
+                             /   \                                  *
+                            /     \                                / \
+                           /       \                              /   \
+                          /         \                            /     \
+                         /           \                          /       \
+                        /             \                        /         \
+                       /               \                      /           \
+                      /                 \                    /             \
+                     Y*                N1*                  *               *
+                     / \                / \                / \             / \
+                    /   \              /   \              /   \           /   \
+                   /     \            /     \            /     \         /     \
+               A'the ' B'quick' C' brown' D' fox' E' jumps' F' over ' G'the     *
+                                                                               / \
+                                                                              /   \
+                                                                        ' H'lazy ' I'dog.'
+
+We decreased depth from 8 to 4. Additionally some of old internal nodes
+was reused.
+
+Take look how slicing will work.
+
+  auto s = n[5 .. 20]; // Bs'uick' C' brown' D' fox' Es' ju'
+
+                                                S*
+                                               /  \
+                                              /    \
+                                             /      \
+                                            /        \
+                                           /          \
+                                          /            \
+                                         /              \
+                                        /                \
+                                       /                  \
+                                      /                    \
+                                     /                      \
+                                    /                        \
+                                   /                          \
+                                  /                            \
+                                 /                              \
+                                /                                \
+                               *'                              Es' ju'
+                              / \
+                             /   \
+                            /     \
+                           /       \
+                          /         \
+                         /           \
+                        /             \
+                       /               \
+                      /                 \
+                   Bs'uick'            N1*
+                                        / \
+                                       /   \
+                                      /     \
+                                C' brown' D' fox'
+
+You can see that some of internal nodes was reused (when whole subtree
+is in the slice), and left and right nodes was sliced (using D slices).
+
+Rebalancing of such tree, can produce for example this:
+
+  auto s2 = s.forcebalance();
+                              S2*
+                              /  \
+                             /    \
+                            /      \
+                           /        \
+                          /          \
+                         /            \
+                        /              \
+                       /                \
+                      *                  *
+                     / \                / \
+                    /   \              /   \
+                   /     \            /     \
+              Bs'uick ' C' brown' D' fox' Es' ju'
+
+As you can see there was some important reconstructions. But returned
+structure is well balanced.
+
+Appending is most important operation on cord. Using it all other operations
+can be implemented (not necessary optimally, but very easy).
+
+1a Multiple references to same cord
+==================================
+
+Actually nothing prevents for using single cords as both arguments of
+some operations. Because cords are immutable, generally cords library
+operate not on trees, but on DAG (directed acyclic graphs).
+
+Consider simple cord.
+
+    A*
+    / \
+   /   \
+ 'and' 'this'
+
+
+And now append it to itself
+
+   AA*
+    / \
+   /   \
+   |   |
+    \ /
+    A*
+    / \
+   /   \
+ 'and' 'this'
+
+This is interpreted as
+
+        AA*
+         / \
+        /   \
+       /     \
+      /       \
+    A*        A*
+    / \       / \
+   /   \   'and' 'this'
+ 'and' 'this'
+
+With the difference that there is only one A in memory.
+
+2 Some important optimisations
+==================================
+
+D Cords have few important optimisations. First it uses slicing of arrays,
+so there is no need to recopy any (even limiting left and right leafs of slicing)
+arrays.
+
+There are also some special case when we append small real string, to cords,
+and right substree is leaf, and if it is small string. In such cases (if
+resulting array is smaller than 8 chars, and appended string is smaller than 4),
+it is copied directly.
+
+Consider our starting X cords. We are appending ' fox', resulting tree will be:
+
+                         rX*
+                          / \
+                         /   \
+                        /     \
+                       /       \
+                     Y*     CD' brown fox'
+                     / \
+                    /   \
+                   /     \
+               A'the ' B'quick'
+
+Next append will make this:
+
+
+                              rZ*
+                               / \
+                              /   \
+                             /     \
+                            /       \
+                         rX*       E' jumps'
+                          / \
+                         /   \
+                        /     \
+                       /       \
+                     Y*     CD' brown fox'
+                     / \
+                    /   \
+                   /     \
+               A'the ' B'quick'
+
+Next:
+                             rrZ*
+                               / \
+                              /   \
+                             /     \
+                            /       \
+                         rX*       EF' jumps over '
+                          / \
+                         /   \
+                        /     \
+                       /       \
+                     Y*     CD' brown fox'
+                     / \
+                    /   \
+                   /     \
+               A'the ' B'quick'
+
+Thanks to that depth of tree will grow much slower, especially if we are
+appending single chars (it will grow about 8 times slower).
+
+3 Mutating cords
+==================================
+
+Mutating cords are currently implemented as doing 2 slices, and appending it with
+new char. This can be optimised, because we know that resulting cords will
+have exactly the same structure. There are some exception thought. If leaf
+in which we are to mutate char, is large array, we must recopy it with single change,
+which is costly (small arrays can be copied without big penalty), so in such
+cases we need to create some additional nodes.
+
+
+Consider
+
+                         rX*
+                          / \
+                         /   \
+                        /     \
+                       /       \
+                     Y*     CD' brown fox'
+                     / \
+                    /   \
+                   /     \
+               A'the ' B'quick'
+
+
+Changing i to I (small array optimisation)
+
+                        rX'*
+                          / \
+                         /   \
+                        /     \
+                       /       \
+                    Y'*     CD' brown fox'
+                     / \
+                    /   \
+                   /     \
+               A'the ' B.'quIck'
+
+
+Changing i to I (large arrays, general case)
+
+                        rX'*
+                          / \
+                         /   \
+                        /     \
+                       /       \
+                    Y'*     CD' brown fox'
+                     / \
+                    /   \
+                   /     \
+               A'the '    *
+                         / \
+                        /   \
+                       /     \
+                      *    Bs2'ck'
+                     / \
+                    /   \
+                Bs1'qu' 'I'
+
+
+Actual behaviour.
+
+Slices:
+
+
+Y*   = rX[0 .. 5];
+X*   = rX[6 .. $];
+
+
+                                 X*
+                                 /   \
+                                /     \
+                               /       \
+                              /         \
+                     Y*     B*'ck'      CD' brown fox'
+                     / \
+                    /   \
+                   /     \
+               A'the ' B*'qu'
+
+
+
+Cats:
+
+rZ   = (Y ~ 'I') 
+rR   = rZ ~ X = Y ~ 'I' ~ X
+
+                                   *rR
+                                  /  \
+                                 /    \
+                                /      \
+                               /        \
+                              /          \
+                             /            \
+                            /              \
+                           *rZ             X*
+                          / \             /   \
+                         /   \           /     \
+                        /     \         /       \
+                       /       \       /         \
+                     Y*       'I'    B*'ck'      CD' brown fox'
+                     / \
+                    /   \
+                   /     \
+               A'the ' B*'qu'
+
+
+
+4a Inserting data
+==================================
+
+Inserting single chars, string, or whole cords, into the other cords is implemented
+using doing proper slices and then appending 3 cords
+(or 2 in corner cases [end,start], or 1 in degenerated cases of empty strings).
+
+
+5 Iterating cords using foreach
+==================================
+
+Just use
+
+foreach (chunk; X) {
+    writef("%s", chunk);
+}
+
+or foreach_reverse (remember to iterate returned chunk also in backward).
+
+You need to manually track position.
+
+6 Iterating cords using iterator
+==================================
+
+You can get iterator using .getIterator method. Returned iterator have
+few methods for retrieving data and traversing cord.
+
+
+7 Supported operations and theirs estimated costs
+==================================
+
+1. Conversion from standard arrays: O(1)
+   1. Access to such arrays: O(1)
+   2. Slicing of such arrays: O(1)
+
+2. Appending single char: O(log n),
+   because from time to time there is rebalancing needed,
+   to ensure that such crated cords will still have at most O(log n)
+   fetching time (and not O(n) !)
+
+   Normally balancing are done only when tree is very deep, and not well
+   balanced, because balancing is costly. In current implementation if we
+   will append single chars, to empty cord, balancing will trigger first
+   after 320 chars, then after next 240. So it is well amortized.
+   (Balancing can be forced, but this is not recommended (can reduce
+   performance). It is useful if we know that this cords will be no more
+   changed)
+
+3. Fetching single char: O(log n)
+   in some cases less if cords ware prepared in some special ways
+
+4. Conversion to standard D arrays and iterations: O(n)
+   Sometimes O(1) in corner cases.
+
+
+8 Disadvantages of cords
+=================================
+
+Cords aren't good for everything. Iterating them can consume some memory,
+and / or stack. They can be too powerful thing if you just need,
+appending, prepending with other strings, and at the end just write it to a file
+or socket (for such applications IOList is better). Cords uses garbage collection
+for freeing unreferenced leaf and nodes. This can be done using reference
+counting because structure is acyclic. There can be problems with slicing big real
+arrays. Because slice still contains reference to original array's elements,
+original array can't be free, even if slice is just 1 Byte, and original array
+is 100 MBytes. Solution is too use small chunks (64 bytes) when reading big files,
+or converting from D strings. One can also repack them.
+
+
+But if you need slicing, undo history, appending in the middle,
+and changing big text files, this is good choice.
+
+If one need only to build text by append, prepends and concatenation
+of other blocks, simple one-directional linked list (IOList), can be better.
+Eventually double pass algorithm (in first pass determine size of result,
+then populate it by data), but it's not worth in most cases, when we are controlling
+interfaces (so can receive structure other than flat array).
+
+9 Further work and optimisations
+=================================
+
+Iterators can be significantly be smaller, remember only last few elements of path,
+then if the sub tree will be iterated find new entry point for path (which is O(log N),
+but is done rearly). This should significantly reduce memory consumptions, without
+compromising performance. There also should be easy way to save (compact) state of iterator (actually
+just current position is enough), and then restore it (be recreating path), useful for example
+in Regexp implementation with backtracking.
+
+Regular Expression matching and replace, using regular expression engine from Tango.
+(It is so amazingly fast).
+
+Implement repack() operation: search for small leafs, and merge them. Additionally
+know what was original size of string array if it is slice to some unreferenced
+array, in such case recopy only necessary part of slice, and free old array.
+
+Implement fullclone(), recopy whole cord, so all leaf are completely fresh, well balanced,
+there are no large leafs (so referencing to them, and then destroying original cords will
+not waste memory because GC can't remove large array when small slice is referencing to it),
+and are referenced only once. Attention, this can destroy sparse structure (if some
+subtrees are referenced multiple times in single cords), and will consume O(n) memory.
+
+It can be useful to temporally disable balancing, for example in phase of building cord.
+Then rebalance it once and access it faster. Or don't balance them anyway, just write to file,
+and destroy.
+This can be partially using simpler structure, like deep list, but lists can't be balanced.
+We can emulate this by providing conversion between both types, which should be trivial.
+
+We can also optimise further string appends, because currently if right subtree is short array,
+and we are appending short string, then we are packing this two short strings into new array,
+this is because in such situation tree depth will grow slower. But actually this lead to O(k^2)
+constant (but k is 8), because we are copying k times about k/2 chars on average. We can do better,
+don't copy, just create normal concatenation node, then check if this small string have small
+string as the same child as it, in such case do packing. To prevent O(n^2) blow, store some
+helping information (like number of direct short strings on one side).
+Unfortunately this helping information can be mutable, and cord dependent. :/
+
+We can also do some lazy concatenation, have list of concatenated objects, then on 
+other operation (like access, or concatenation from second side, or slicing),
+for creation of cord for them, optimising layout knowing exact sizes,
+and replace it. Currently user should use provided cat() function
+for concatenation known number of elements) if possible. Eventually
+use standard ~ operator and brackets to enforce initial layout.
+
+We can also allow for storing user defined immutable data. Useful
+for implementing range queries, like: "On which lines of file
+chars 705167-706332 are?" or "What is the longest word in this three paragraphs?"
+
+
+10 Experience with D
+=================================
+
+Contracts and unittesting was very helpful in implementing cords,
+and ensuring they works properly.
+
+Class based approach and operator overloading fitted very nicely into
+this project. First try was using single class without virtual functions,
+with internal union and some flags. This was probably not very easy to maintain,
+and performance gain was not big enough.
+
+Bound checking, and exception's makes error handling much easier.
+
+
+I have lots of problem with const correctness of cords. I really want
+to make them const correct, so it will be simpler to use in some scenarios
+like multithreaded programs. And more optimal code generation.
+Currently i failed in this attempt
+
+Update: 2 Jun 2009, const correctness done. Thanks to Rebindable and
+few fixes in compiler.

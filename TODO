@@ -1,0 +1,82 @@
+Dodatkowe metody:
+
+Templates like this:
+
+   cord title = ...;
+   cord author = ...;
+   cord article = ...;
+
+   cord X = template(r"<html>
+   <head><title>{title}</title></head>
+     <body>
+       <h1>{header}</h1>
+       By {author}
+       <p>{article}</p>
+     </body>
+   </html>");
+
+   // - it will just merge constant nodes, and create call
+   //   to the concat of multiple cords
+   // - we should use templates similar to other programing templates
+   // - template should be static string or static file content (using mixin)
+   // - both static and dynamic templates should be possible
+   // - we can also support encoding of the fly (like changing characters into HTML entities)
+   // - one can also support expression templates, which will simplify switching, but will not be template
+
+From Python:
+ - cord c.py.swapcase()
+ - cord[] c.py.splitlines(bool keepends = false)
+ - cord[] c.py.split(uint maxsplit = -1) // split on whitespace
+ - cord[] c.py.split(cord|string sep, uint maxsplit = -1)
+ - cord[] c.py.rsplit(uint maxsplit = -1) // split on whitespace
+ - cord[] c.py.rsplit(cord|string sep, uint maxsplit = -1)
+ - [head,sep,tail] = cord[3] c.py.partition(cord|string sep)
+ - [tail,sep,head] = cord[3] c.py.rpartition(cord|string sep)
+ - cord c.py.center(uint width, char fillchar = ' ')
+ - cord c.py.ljust(uint width, char fillchar = ' ')
+ - cord c.py.rjust(uint width, char fillchar = ' ')
+ - uint c.py.count(cord|string sub)
+ - uint c.py.count(cord|string sub, uint start = 0, uint end = -1) // not really needed, as slicing is cheap
+ - cord c.py.lower()
+ - cord c.py.upper()
+ - cord c.py.title()
+ - cord c.py.islower()
+ - cord c.py.isupper()
+ - bool c.py.istitle()
+ - bool c.py.isdigit()
+ - bool c.py.isalpha()
+ - bool c.py.isalnum()
+ - bool c.py.isspace()
+ - cord c.py.capitalize()
+ - bool c.py.starswith(cord|string prefix, uint start = 0, uint end = -1)
+ - bool c.py.endswith(cord|string prefix, uint start = 0, uint end = -1)
+ - cord c.py.lstrip(string chars = " \t")
+ - cord c.py.rstrip(string chars = " \t")
+ - cord c.py.strip(string chars = " \t")
+ - cord c.py.expandtabs(uint tabsize = 8)
+ - cord c.py.zfill(uint width)
+ - int c.py.find(cord|string sub, uint start = 0, uint end = -1) // in python, returns -1 on failure.
+ - int c.py.rfind(cord|string sub, uint start = 0, uint end = -1)
+ - int c.py.index(cord|string sub, uint start = 0, uint end = -1) // same as find but throws exception on failure
+ - int c.py.rindex(cord|string sub, uint start = 0, uint end = -1)
+ - cord c.py.decode(string encoding, bool errors)
+ - cord c.py.encode(string encoding, bool errors)
+ - cord c.py.join(cord[] sequenced) // uses c as string in the middle
+ - cord c.py.replace(cord|string old, cord|string new, uint count = -1)
+ - cord c.py.translate(char[256] table, bool[char] deletchards = null)
+
+
+From Ruby:
+   %   *   +   <<   <=>   ==   =~   []   []=   block_scanf   capitalize   capitalize!
+   casecmp   center   chomp   chomp!   chop   chop   chop!   chop!   concat   count
+   crypt   delete   delete   delete!   delete!   downcase   downcase!   dump   each
+   each_byte   each_char   each_line   empty?   end_regexp   eql?   gsub   gsub!
+   hash   hex   include?   index   initialize_copy   insert   inspect   intern
+   iseuc   issjis   isutf8   jcount   jlength   jsize   kconv   length   ljust
+   lstrip   lstrip!   match   mbchar?   new   next   next!   oct   quote
+   replace   reverse   reverse!   rindex   rjust   rstrip   rstrip!   scan
+   scanf   size   slice   slice!   split   squeeze   squeeze   squeeze!   squeeze!
+   strip   strip!   sub   sub!   succ   succ   succ!   succ!   sum   swapcase   swapcase!
+   to_f   to_i   to_s   to_str   to_sym   toeuc   tojis   tosjis   toutf16   toutf8
+   tr   tr   tr!   tr!   tr_s   tr_s   tr_s!   tr_s!   unpack   upcase   upcase!   upto
+
